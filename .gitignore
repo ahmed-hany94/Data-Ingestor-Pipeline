@@ -1,0 +1,24 @@
+# Go
+services/ingestion-api/*.exe
+services/ingestion-api/*.test
+
+# Python
+__pycache__/
+*.pyc
+services/fintech-risk-engine/venv/
+*.egg-info/
+
+# Node/TypeScript
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Env / secrets
+.env
+
+# OS
+.DS_Store
+EOF
+
+# Local
+.vscode/

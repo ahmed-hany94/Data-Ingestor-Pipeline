@@ -1,0 +1,137 @@
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=platform
+      - POSTGRES_PASSWORD=platform
+      - POSTGRES_DB=platform
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U platform -d platform"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  ingestion-api:
+    build:
+      context: ./services/ingestion-api
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - REDIS_URL=redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+  orchestrator:
+    build:
+      context: ./services/orchestrator
+    restart: unless-stopped
+    environment:
+      - REDIS_URL=redis:6379
+      - DATABASE_URL=postgresql://platform:platform@postgres:5432/platform
+      - FINTECH_SERVICE_URL=http://fintech-risk-engine:8000
+      - PROPTECH_SERVICE_URL=http://proptech-recommender:3000
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      fintech-risk-engine:
+        condition: service_healthy
+      proptech-recommender:
+        condition: service_healthy
+    # No healthcheck: this service has no listening port. If you want one,
+    # consider a small heartbeat key written to Redis on each poll loop.
+
+  fintech-risk-engine:
+    build:
+      context: ./services/fintech-risk-engine
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://platform:platform@postgres:5432/platform
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz').status==200 else 1)"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+  proptech-recommender:
+    build:
+      context: ./services/proptech-recommender
+    restart: unless-stopped
+    ports:
+      - "3001:3000"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/healthz"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+  notification-ws:
+    build:
+      context: ./services/notification-ws
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - REDIS_URL=redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "bun", "-e", "fetch('http://localhost:3000/healthz').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+  dashboard:
+    build:
+      context: ./services/dashboard
+    restart: unless-stopped
+    ports:
+      - "5173:5173"
+    environment:
+      - VITE_WS_URL=ws://localhost:3000
+      - VITE_EVENT_STORE_API_URL=http://localhost:8000
+    depends_on:
+      notification-ws:
+        condition: service_healthy
+
+volumes:
+  redis-data:
+  postgres-data:

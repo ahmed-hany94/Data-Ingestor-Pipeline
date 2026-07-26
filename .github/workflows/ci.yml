@@ -1,0 +1,314 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+# Cancel superseded runs on the same branch/PR to save minutes
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------
+  # Detect which services changed so we only build/test what's needed
+  # ---------------------------------------------------------------------
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      go: ${{ steps.filter.outputs.go }}
+      orchestrator: ${{ steps.filter.outputs.orchestrator }}
+      fintech: ${{ steps.filter.outputs.fintech }}
+      proptech: ${{ steps.filter.outputs.proptech }}
+      node: ${{ steps.filter.outputs.node }}
+      dashboard: ${{ steps.filter.outputs.dashboard }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            go:
+              - 'services/ingestion-api/**'
+            orchestrator:
+              - 'services/orchestrator/**'
+            fintech:
+              - 'services/fintech-risk-engine/**'
+            proptech:
+              - 'services/proptech-recommender/**'
+            node:
+              - 'services/notification-ws/**'
+            dashboard:
+              - 'services/dashboard/**'
+
+  # ---------------------------------------------------------------------
+  # Go: ingestion-api
+  # ---------------------------------------------------------------------
+  ingestion-api:
+    needs: changes
+    if: needs.changes.outputs.go == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/ingestion-api
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache-dependency-path: services/ingestion-api/go.sum
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./... -race -cover
+
+      - name: Build
+        run: go build ./...
+
+  # ---------------------------------------------------------------------
+  # Python: orchestrator (dispatch layer — Strategy/Factory/Adapter)
+  # ---------------------------------------------------------------------
+  orchestrator:
+    needs: changes
+    if: needs.changes.outputs.orchestrator == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/orchestrator
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: services/orchestrator/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          pip install --break-system-packages -r requirements.txt
+          pip install --break-system-packages pytest ruff
+
+      - name: Lint
+        run: ruff check src/
+
+      - name: Test
+        run: pytest -v
+
+  # ---------------------------------------------------------------------
+  # Python/Django: fintech-risk-engine
+  # ---------------------------------------------------------------------
+  fintech-risk-engine:
+    needs: changes
+    if: needs.changes.outputs.fintech == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/fintech-risk-engine
+    env:
+      # SQLite in CI keeps this job self-contained — no Postgres service
+      # container needed just to run unit tests. Compose still uses Postgres.
+      DATABASE_URL: sqlite:///ci_test.db
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: services/fintech-risk-engine/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          pip install --break-system-packages -r requirements.txt
+          pip install --break-system-packages ruff
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Django system check
+        run: python manage.py check
+
+      - name: Test
+        run: python manage.py test
+
+  # ---------------------------------------------------------------------
+  # TypeScript/Next.js: proptech-recommender
+  # ---------------------------------------------------------------------
+  proptech-recommender:
+    needs: changes
+    if: needs.changes.outputs.proptech == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/proptech-recommender
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Cache Bun dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('services/proptech-recommender/bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Type check
+        run: bunx tsc --noEmit
+
+      - name: Lint
+        run: bun run --if-present lint
+
+      - name: Test
+        run: bun run --if-present test
+
+      - name: Build
+        run: bun run build
+
+  # ---------------------------------------------------------------------
+  # TypeScript: notification-ws
+  # ---------------------------------------------------------------------
+  notification-ws:
+    needs: changes
+    if: needs.changes.outputs.node == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/notification-ws
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Cache Bun dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('services/notification-ws/bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Type check
+        run: bunx tsc --noEmit
+
+      - name: Lint
+        run: bun run --if-present lint
+
+      - name: Test
+        run: bun run --if-present test
+        # --if-present exits 0 if the script isn't defined, matching npm's flag of the same name
+
+      - name: Build
+        run: bun run build
+
+  # ---------------------------------------------------------------------
+  # React: dashboard
+  # ---------------------------------------------------------------------
+  dashboard:
+    needs: changes
+    if: needs.changes.outputs.dashboard == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/dashboard
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Cache Bun dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('services/dashboard/bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Type check
+        run: bunx tsc --noEmit
+
+      - name: Lint
+        run: bun run --if-present lint
+
+      - name: Test
+        run: bun run --if-present test
+
+      - name: Build
+        run: bun run build
+
+  # ---------------------------------------------------------------------
+  # End-to-end: only run if any service changed, and only after that
+  # service's own job has passed
+  # ---------------------------------------------------------------------
+  e2e:
+    needs: [changes, ingestion-api, orchestrator, fintech-risk-engine, proptech-recommender, notification-ws, dashboard]
+    if: |
+      always() &&
+      (needs.ingestion-api.result == 'success' || needs.ingestion-api.result == 'skipped') &&
+      (needs.orchestrator.result == 'success' || needs.orchestrator.result == 'skipped') &&
+      (needs.fintech-risk-engine.result == 'success' || needs.fintech-risk-engine.result == 'skipped') &&
+      (needs.proptech-recommender.result == 'success' || needs.proptech-recommender.result == 'skipped') &&
+      (needs.notification-ws.result == 'success' || needs.notification-ws.result == 'skipped') &&
+      (needs.dashboard.result == 'success' || needs.dashboard.result == 'skipped') &&
+      (needs.changes.outputs.go == 'true' || needs.changes.outputs.orchestrator == 'true' ||
+       needs.changes.outputs.fintech == 'true' || needs.changes.outputs.proptech == 'true' ||
+       needs.changes.outputs.node == 'true' || needs.changes.outputs.dashboard == 'true')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install e2e test dependencies
+        run: pip install --break-system-packages -r tests/requirements.txt
+
+      - name: Start the full stack
+        run: docker compose up --build -d
+
+      - name: Wait for services to be healthy
+        run: |
+          timeout 120s bash -c '
+            for svc in ingestion-api fintech-risk-engine proptech-recommender notification-ws; do
+              until [ "$(docker inspect -f "{{.State.Health.Status}}" $(docker compose ps -q $svc))" = "healthy" ]; do
+                sleep 2
+              done
+            done
+          '
+
+      - name: Run e2e suite
+        run: pytest tests/e2e_pipeline_test.py -v
+
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose logs
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
